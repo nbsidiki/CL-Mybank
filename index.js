@@ -13,6 +13,7 @@ app.set("views", path.join(__dirname, "views"));
 app.use(express.static(path.join(__dirname, "public")));
 
 app.use(express.json());
+app.use(express.urlencoded({ extended: true })); // Middleware to handle form data
 
 let connection;
 
@@ -28,7 +29,6 @@ async function connectToDatabase() {
         console.error(err);
     }
 }
-
 
 async function setupDatabase() {
     // Remove old tables, dev only.
@@ -88,11 +88,11 @@ async function setupDatabase() {
       BEGIN
           INSERT INTO accounts (name, amount, user_id)
           VALUES (p_account_name, p_account_amount, p_user_id)
-          RETURNING id p_account_id;
+          RETURNING id INTO p_account_id;
 
           UPDATE users
           SET accounts = accounts + 1
-          WHERE id = p_user_id
+          WHERE id = p_user_id;
       END;`
     );
 
@@ -104,11 +104,9 @@ async function setupDatabase() {
     ];
 
     let usersResult = await connection.executeMany(usersSql, usersRows);
-    //console.log(usersResult.rowsAffected, "Users rows inserted");
     const accountsSql = `insert into accounts (name, amount, user_id) values(:1, :2, :3)`;
     const accountsRows = [["Compte courant", 2000, 1]];
     let accountsResult = await connection.executeMany(accountsSql, accountsRows);
-    //console.log(accountsResult.rowsAffected, "Accounts rows inserted");
     connection.commit(); // Now query the rows back
 }
 
@@ -124,7 +122,7 @@ app.get("/users", async (req, res) => {
     res.json(result.rows);
 });
 
-app.get("/account", async (req, res) => {
+app.get("/accounts", async (req, res) => {
     const getAccountsSQL = `select * from accounts`;
     const result = await connection.execute(getAccountsSQL);
 
@@ -151,22 +149,22 @@ app.post("/users", async (req, res) => {
 
 app.post("/accounts", async (req, res) => {
     const createAccountSQL = `BEGIN
-      insert_accounts(:name, :amount, :user_id);
+      insert_accounts(:name, :amount, :user_id, :account_id);
     END;`;
     const result = await connection.execute(createAccountSQL, {
         name: req.body.name,
         amount: req.body.amount,
-        user_id: req.body.user_id,  // Assuming user_id is provided in the request body
+        user_id: req.body.user_id, // Assuming user_id is provided in the request body
+        account_id: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
     });
 
     console.log(result);
-    if (result.rowsAffected && result.rowsAffected > 0) {
+    if (result.outBinds && result.outBinds.account_id) {
         res.redirect(`/views/${req.body.user_id}`);
     } else {
         res.sendStatus(500);
     }
 });
-
 
 app.get("/views/:userId", async (req, res) => {
     const getCurrentUserSQL = `select * from users where id = :1`;
@@ -176,13 +174,11 @@ app.get("/views/:userId", async (req, res) => {
         connection.execute(getAccountsSQL, [req.params.userId]),
     ]);
 
-    //console.log(currentUser.rows[0], "fgvsdf", accounts.rows, " successfully")
     res.render("user-view", {
         currentUser: currentUser.rows[0],
         accounts: accounts.rows,
     });
 });
-
 
 connectToDatabase().then(async () => {
     await setupDatabase();
