@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Account Transactions</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        .container {
+            background-color: #fff;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            width: 80%;
+            max-width: 800px;
+            margin: 2rem auto;
+        }
+
+        h1,
+        h2,
+        h3 {
+            color: #333;
+            text-align: center;
+        }
+
+        p {
+            color: #555;
+            text-align: center;
+        }
+
+        ul {
+            list-style-type: none;
+            padding: 0;
+        }
+
+        ul li {
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 5px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        ul li:nth-child(odd) {
+            background-color: #efefef;
+        }
+
+        form {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 20px;
+        }
+
+        form label {
+            margin: 5px 0;
+        }
+
+        form input,
+        form select,
+        form button {
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+            width: 100%;
+            max-width: 300px;
+        }
+
+        form button {
+            background-color: #007bff;
+            color: #fff;
+            border: none;
+            cursor: pointer;
+        }
+
+        form button:hover {
+            background-color: #0056b3;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Account: <%= currentAccount.NAME %>
+        </h1>
+        <p>Amount: <%= currentAccount.AMOUNT %> EUR</p>
+        <p>Number of Transactions: <%= currentAccount.TRANSACTIONS %>
+        </p>
+
+        <h2>Transactions</h2>
+        <ul>
+            <% transactions.forEach(function(transaction) { %>
+                <li>
+                    <span>
+                        <%= transaction.NAME %>
+                    </span>
+                    <span>
+                        <%= transaction.AMOUNT %> EUR
+                    </span>
+                    <span>
+                        <%= transaction.TYPE===1 ? 'In' : 'Out' %>
+                    </span>
+                </li>
+                <% }) %>
+        </ul>
+
+        <h3>Create a New Transaction</h3>
+        <form action="/transactions" method="POST">
+            <input type="hidden" name="account_id" value="<%= currentAccount.ID %>">
+            <input type="hidden" name="user_id" value="<%= currentAccount.USER_ID %>">
+            <label for="name">Transaction Name:</label>
+            <input type="text" id="name" name="name" required>
+            <label for="amount">Amount:</label>
+            <input type="number" id="amount" name="amount" required>
+            <label for="type">Type:</label>
+            <select id="type" name="type" required>
+                <option value="1">In</option>
+                <option value="0">Out</option>
+            </select>
+            <button type="submit">Create Transaction</button>
+        </form>
+    </div>
+</body>
+
+</html>

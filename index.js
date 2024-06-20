@@ -15,6 +15,9 @@ app.use(express.static(path.join(__dirname, "public")));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true })); // Middleware to handle form data
 
+
+oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
+
 let connection;
 
 async function connectToDatabase() {
@@ -83,6 +86,17 @@ async function setupDatabase() {
     );
 
     await connection.execute(
+        `CREATE OR REPLACE PROCEDURE format_transaction_name (
+          p_transaction_type IN transactions.type%TYPE,
+          p_transaction_name IN transactions.name%TYPE,
+          p_formatted_name OUT VARCHAR2
+        ) AS
+        BEGIN
+          p_formatted_name := 'T' || p_transaction_type || '-' || UPPER(p_transaction_name);
+        END;`
+    );
+
+    await connection.execute(
         `CREATE OR REPLACE PROCEDURE insert_user (
           p_user_name IN users.name%TYPE,
           p_user_email IN users.email%TYPE,
@@ -120,24 +134,28 @@ async function setupDatabase() {
           p_transaction_type IN transactions.type%TYPE,
           p_account_id IN transactions.account_id%TYPE,
           p_transaction_id OUT transactions.id%TYPE
-      ) AS
-      BEGIN
+        ) AS
+          v_formatted_name VARCHAR2(256);
+        BEGIN
+          -- Call the formatting procedure
+          format_transaction_name(p_transaction_type, p_transaction_name, v_formatted_name);
+
           INSERT INTO transactions (name, amount, type, account_id)
-          VALUES (p_transaction_name, p_transaction_amount, p_transaction_type, p_account_id)
+          VALUES (v_formatted_name, p_transaction_amount, p_transaction_type, p_account_id)
           RETURNING id INTO p_transaction_id;
 
           IF p_transaction_type = 1 THEN -- In transaction
-              UPDATE accounts
-              SET amount = amount + p_transaction_amount,
-                  transactions = transactions + 1
-              WHERE id = p_account_id;
+            UPDATE accounts
+            SET amount = amount + p_transaction_amount,
+                transactions = transactions + 1
+            WHERE id = p_account_id;
           ELSIF p_transaction_type = 0 THEN -- Out transaction
-              UPDATE accounts
-              SET amount = amount - p_transaction_amount,
-                  transactions = transactions + 1
-              WHERE id = p_account_id;
+            UPDATE accounts
+            SET amount = amount - p_transaction_amount,
+                transactions = transactions + 1
+            WHERE id = p_account_id;
           END IF;
-      END;`
+        END;`
     );
 
     // Insert some data
@@ -183,6 +201,7 @@ app.post("/users", async (req, res) => {
         user_id: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
     });
 
+    console.log(result);
     if (result.outBinds && result.outBinds.user_id) {
         res.redirect(`/views/${result.outBinds.user_id}`);
     } else {
@@ -201,6 +220,7 @@ app.post("/accounts", async (req, res) => {
         account_id: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
     });
 
+    console.log(result);
     if (result.outBinds && result.outBinds.account_id) {
         res.redirect(`/views/${req.body.user_id}`);
     } else {
@@ -220,8 +240,9 @@ app.post("/transactions", async (req, res) => {
         transaction_id: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
     });
 
+    console.log(result);
     if (result.outBinds && result.outBinds.transaction_id) {
-        res.redirect(`/views/${req.body.user_id}`);
+        res.redirect(`/views/${req.body.user_id}/${req.body.account_id}`);
     } else {
         res.sendStatus(500);
     }
@@ -241,10 +262,24 @@ app.get("/views/:userId", async (req, res) => {
     });
 });
 
+app.get("/views/:userId/:accountId", async (req, res) => {
+    const getCurrentAccountSQL = `select * from accounts where id = :1 and user_id = :2`;
+    const getTransactionsSQL = `select * from transactions where account_id = :1`;
+    const [currentAccount, transactions] = await Promise.all([
+        connection.execute(getCurrentAccountSQL, [req.params.accountId, req.params.userId]),
+        connection.execute(getTransactionsSQL, [req.params.accountId]),
+    ]);
+    console.log(currentAccount.rows[0], transactions.rows)
+    res.render("account-view", {
+        currentAccount: currentAccount.rows[0],
+        transactions: transactions.rows,
+    });
+});
+
 connectToDatabase().then(async () => {
     await setupDatabase();
 
     app.listen(3000, () => {
         console.log("Server started on http://localhost:3000");
-    })
+    });
 });
