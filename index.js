@@ -36,6 +36,7 @@ async function setupDatabase() {
         `BEGIN
       execute immediate 'drop table users CASCADE CONSTRAINTS';
       execute immediate 'drop table accounts CASCADE CONSTRAINTS';
+      execute immediate 'drop table transactions CASCADE CONSTRAINTS';
       exception when others then if sqlcode <> -942 then raise; end if;
       END;`
     );
@@ -55,11 +56,27 @@ async function setupDatabase() {
         `create table accounts (
       id number generated always as identity,
       name varchar2(256),
-      amount number,
+      amount number default 0,
       user_id number,
+      transactions number default 0,
       CONSTRAINT fk_user
       FOREIGN KEY (user_id)
       REFERENCES users (id),
+      creation_ts timestamp with time zone default current_timestamp,
+      primary key (id)
+  )`
+    );
+
+    await connection.execute(
+        `create table transactions (
+      id number generated always as identity,
+      name varchar2(256),
+      amount number,
+      type number(1) check (type in (0, 1)),
+      account_id number,
+      CONSTRAINT fk_account
+      FOREIGN KEY (account_id)
+      REFERENCES accounts (id),
       creation_ts timestamp with time zone default current_timestamp,
       primary key (id)
   )`
@@ -79,7 +96,7 @@ async function setupDatabase() {
     );
 
     await connection.execute(
-        `CREATE OR REPLACE PROCEDURE insert_accounts (
+        `CREATE OR REPLACE PROCEDURE insert_account (
           p_account_name IN accounts.name%TYPE,
           p_account_amount IN accounts.amount%TYPE,
           p_user_id IN accounts.user_id%TYPE,
@@ -96,6 +113,33 @@ async function setupDatabase() {
       END;`
     );
 
+    await connection.execute(
+        `CREATE OR REPLACE PROCEDURE insert_transaction (
+          p_transaction_name IN transactions.name%TYPE,
+          p_transaction_amount IN transactions.amount%TYPE,
+          p_transaction_type IN transactions.type%TYPE,
+          p_account_id IN transactions.account_id%TYPE,
+          p_transaction_id OUT transactions.id%TYPE
+      ) AS
+      BEGIN
+          INSERT INTO transactions (name, amount, type, account_id)
+          VALUES (p_transaction_name, p_transaction_amount, p_transaction_type, p_account_id)
+          RETURNING id INTO p_transaction_id;
+
+          IF p_transaction_type = 1 THEN -- In transaction
+              UPDATE accounts
+              SET amount = amount + p_transaction_amount,
+                  transactions = transactions + 1
+              WHERE id = p_account_id;
+          ELSIF p_transaction_type = 0 THEN -- Out transaction
+              UPDATE accounts
+              SET amount = amount - p_transaction_amount,
+                  transactions = transactions + 1
+              WHERE id = p_account_id;
+          END IF;
+      END;`
+    );
+
     // Insert some data
     const usersSql = `insert into users (name, email, accounts) values(:1, :2, :3)`;
     const usersRows = [
@@ -103,14 +147,14 @@ async function setupDatabase() {
         ["Amélie Dal", "amelie.dal@gmail.com", 0],
     ];
 
-    let usersResult = await connection.executeMany(usersSql, usersRows);
+    await connection.executeMany(usersSql, usersRows);
     const accountsSql = `insert into accounts (name, amount, user_id) values(:1, :2, :3)`;
     const accountsRows = [["Compte courant", 2000, 1]];
-    let accountsResult = await connection.executeMany(accountsSql, accountsRows);
-    connection.commit(); // Now query the rows back
+    await connection.executeMany(accountsSql, accountsRows);
+    connection.commit();
 }
 
-// Define a route to render the HTML file
+// Define routes
 app.get("/", async (req, res) => {
     res.render("index"); // Assuming you have an "index.ejs" file in the "views" directory
 });
@@ -139,7 +183,6 @@ app.post("/users", async (req, res) => {
         user_id: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
     });
 
-    console.log(result);
     if (result.outBinds && result.outBinds.user_id) {
         res.redirect(`/views/${result.outBinds.user_id}`);
     } else {
@@ -149,17 +192,35 @@ app.post("/users", async (req, res) => {
 
 app.post("/accounts", async (req, res) => {
     const createAccountSQL = `BEGIN
-      insert_accounts(:name, :amount, :user_id, :account_id);
+      insert_account(:name, :amount, :user_id, :account_id);
     END;`;
     const result = await connection.execute(createAccountSQL, {
         name: req.body.name,
         amount: req.body.amount,
-        user_id: req.body.user_id, // Assuming user_id is provided in the request body
+        user_id: req.body.user_id,
         account_id: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
     });
 
-    console.log(result);
     if (result.outBinds && result.outBinds.account_id) {
+        res.redirect(`/views/${req.body.user_id}`);
+    } else {
+        res.sendStatus(500);
+    }
+});
+
+app.post("/transactions", async (req, res) => {
+    const createTransactionSQL = `BEGIN
+      insert_transaction(:name, :amount, :type, :account_id, :transaction_id);
+    END;`;
+    const result = await connection.execute(createTransactionSQL, {
+        name: req.body.name,
+        amount: req.body.amount,
+        type: req.body.type,
+        account_id: req.body.account_id,
+        transaction_id: { dir: oracledb.BIND_OUT, type: oracledb.NUMBER },
+    });
+
+    if (result.outBinds && result.outBinds.transaction_id) {
         res.redirect(`/views/${req.body.user_id}`);
     } else {
         res.sendStatus(500);
