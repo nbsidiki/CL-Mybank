@@ -190,34 +190,53 @@ async function setupDatabase() {
         END;`
     );
 
-    // Insérer des données
-    const usersSql = `INSERT INTO users (name, email, accounts) VALUES(:1, :2, :3)`;
+    await connection.execute(
+        `CREATE OR REPLACE PROCEDURE get_transactions_until_budget (
+            p_account_id IN transactions.account_id%TYPE,
+            p_budget IN NUMBER,
+            p_cursor OUT SYS_REFCURSOR
+        ) IS
+            v_total_amount NUMBER := 0;
+        BEGIN
+            OPEN p_cursor FOR
+            SELECT id, name, amount, type, account_id, creation_ts
+            FROM (
+                SELECT id, name, amount, type, account_id, creation_ts,
+                    SUM(amount) OVER (ORDER BY creation_ts) AS running_total
+                FROM transactions
+                WHERE account_id = p_account_id
+            )
+            WHERE running_total <= p_budget;
+        END get_transactions_until_budget;`
+    );
+
+    // Insertion de quelques données
+    const usersSql = `INSERT INTO users (name, email, accounts) VALUES (:1, :2, :3)`;
     const usersRows = [
         ["Valentin Montagne", "contact@vm-it-consulting.com", 0],
         ["Amélie Dal", "amelie.dal@gmail.com", 0],
     ];
 
     await connection.executeMany(usersSql, usersRows);
-    const accountsSql = `INSERT INTO accounts (name, amount, user_id) VALUES(:1, :2, :3)`;
+    const accountsSql = `INSERT INTO accounts (name, amount, user_id) VALUES (:1, :2, :3)`;
     const accountsRows = [["Compte courant", 2000, 1]];
     await connection.executeMany(accountsSql, accountsRows);
-    await connection.commit();
+    connection.commit();
 }
-
 
 app.get("/", async (req, res) => {
     res.render("index");
 });
 
 app.get("/users", async (req, res) => {
-    const getUsersSQL = `select * from users`;
+    const getUsersSQL = `SELECT * FROM users`;
     const result = await connection.execute(getUsersSQL);
 
     res.json(result.rows);
 });
 
 app.get("/accounts", async (req, res) => {
-    const getAccountsSQL = `select * from accounts`;
+    const getAccountsSQL = `SELECT * FROM accounts`;
     const result = await connection.execute(getAccountsSQL);
 
     res.json(result.rows);
@@ -225,7 +244,7 @@ app.get("/accounts", async (req, res) => {
 
 app.post("/users", async (req, res) => {
     const createUserSQL = `BEGIN
-          insert_user(:name, :email, :user_id);
+        insert_user(:name, :email, :user_id);
     END;`;
     const result = await connection.execute(createUserSQL, {
         name: req.body.name,
@@ -243,7 +262,7 @@ app.post("/users", async (req, res) => {
 
 app.post("/accounts", async (req, res) => {
     const createAccountSQL = `BEGIN
-          insert_account(:name, :amount, :user_id, :account_id);
+        insert_account(:name, :amount, :user_id, :account_id);
     END;`;
     const result = await connection.execute(createAccountSQL, {
         name: req.body.name,
@@ -262,7 +281,7 @@ app.post("/accounts", async (req, res) => {
 
 app.post("/transactions", async (req, res) => {
     const createTransactionSQL = `BEGIN
-          insert_transaction(:name, :amount, :type, :account_id, :transaction_id);
+        insert_transaction(:name, :amount, :type, :account_id, :transaction_id);
     END;`;
     const result = await connection.execute(createTransactionSQL, {
         name: req.body.name,
@@ -281,8 +300,8 @@ app.post("/transactions", async (req, res) => {
 });
 
 app.get("/views/:userId", async (req, res) => {
-    const getCurrentUserSQL = `select * from users where id = :1`;
-    const getAccountsSQL = `select * from accounts where user_id = :1`;
+    const getCurrentUserSQL = `SELECT * FROM users WHERE id = :1`;
+    const getAccountsSQL = `SELECT * FROM accounts WHERE user_id = :1`;
     const [currentUser, accounts] = await Promise.all([
         connection.execute(getCurrentUserSQL, [req.params.userId]),
         connection.execute(getAccountsSQL, [req.params.userId]),
@@ -295,8 +314,8 @@ app.get("/views/:userId", async (req, res) => {
 });
 
 app.get("/views/:userId/:accountId", async (req, res) => {
-    const getCurrentAccountSQL = `select * from accounts where id = :1 and user_id = :2`;
-    const getTransactionsSQL = `select * from transactions where account_id = :1`;
+    const getCurrentAccountSQL = `SELECT * FROM accounts WHERE id = :1 AND user_id = :2`;
+    const getTransactionsSQL = `SELECT * FROM transactions WHERE account_id = :1`;
     const [currentAccount, transactions] = await Promise.all([
         connection.execute(getCurrentAccountSQL, [req.params.accountId, req.params.userId]),
         connection.execute(getTransactionsSQL, [req.params.accountId]),
@@ -335,8 +354,8 @@ app.get("/accounts/:accountId/exports", async (req, res) => {
         );
 
         const data = await result.outBinds.content.getData();
-        res.header('Content-Type', 'text/csv');
-        res.attachment('transactions.csv');
+        res.header("Content-Type", "text/csv");
+        res.attachment("transactions.csv");
         res.send(data);
     } catch (err) {
         console.error(err);
@@ -344,6 +363,38 @@ app.get("/accounts/:accountId/exports", async (req, res) => {
     }
 });
 
+app.get("/accounts/:accountId/budgets/:amount", async (req, res) => {
+    try {
+        const accountId = req.params.accountId;
+        const budget = req.params.amount;
+
+        const result = await connection.execute(
+            `BEGIN
+                get_transactions_until_budget(:account_id, :budget, :cursor);
+            END;`,
+            {
+                account_id: accountId,
+                budget: budget,
+                cursor: { dir: oracledb.BIND_OUT, type: oracledb.CURSOR },
+            }
+        );
+
+        const resultSet = result.outBinds.cursor;
+        const transactions = [];
+
+        let row;
+        while ((row = await resultSet.getRow())) {
+            transactions.push(row);
+        }
+
+        await resultSet.close();
+
+        res.json(transactions);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to retrieve transactions" });
+    }
+});
 
 connectToDatabase().then(async () => {
     await setupDatabase();
