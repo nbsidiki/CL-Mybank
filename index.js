@@ -169,7 +169,6 @@ async function setupDatabase() {
         ) AS
             v_formatted_name VARCHAR2(256);
         BEGIN
-            -- Appel de la procédure de formatage
             format_transaction_name(p_transaction_type, p_transaction_name, v_formatted_name);
 
             INSERT INTO transactions (name, amount, type, account_id)
@@ -208,6 +207,41 @@ async function setupDatabase() {
             )
             WHERE running_total <= p_budget;
         END get_transactions_until_budget;`
+    );
+
+    await connection.execute(
+        `CREATE OR REPLACE PROCEDURE update_account_amount (
+            p_account_id IN transactions.account_id%TYPE
+        ) AS
+            v_total_amount NUMBER;
+        BEGIN
+            SELECT NVL(SUM(CASE WHEN type = 1 THEN amount ELSE -amount END), 0)
+            INTO v_total_amount
+            FROM transactions
+            WHERE account_id = p_account_id;
+
+            UPDATE accounts
+            SET amount = v_total_amount
+            WHERE id = p_account_id;
+        END update_account_amount;`
+    );
+
+    await connection.execute(
+        `CREATE OR REPLACE TRIGGER transaction_trigger
+        AFTER INSERT OR UPDATE OR DELETE ON transactions
+        FOR EACH ROW
+        BEGIN
+            IF INSERTING THEN
+                update_account_amount(:NEW.account_id);
+            ELSIF UPDATING THEN
+                update_account_amount(:NEW.account_id);
+                IF :OLD.account_id != :NEW.account_id THEN
+                    update_account_amount(:OLD.account_id);
+                END IF;
+            ELSIF DELETING THEN
+                update_account_amount(:OLD.account_id);
+            END IF;
+        END transaction_trigger;`
     );
 
     // Insertion de quelques données
