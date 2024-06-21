@@ -3,21 +3,13 @@ const express = require("express");
 const app = express();
 const oracledb = require("oracledb");
 
-// Set EJS as the view engine
 app.set("view engine", "ejs");
-
-// Define the directory where your HTML files (views) are located
 app.set("views", path.join(__dirname, "views"));
-
-// Optionally, you can define a static files directory (CSS, JS, images, etc.)
 app.use(express.static(path.join(__dirname, "public")));
-
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // Middleware to handle form data
-
+app.use(express.urlencoded({ extended: true }));
 
 oracledb.outFormat = oracledb.OUT_FORMAT_OBJECT;
-
 let connection;
 
 async function connectToDatabase() {
@@ -34,147 +26,187 @@ async function connectToDatabase() {
 }
 
 async function setupDatabase() {
-    // Remove old tables, dev only.
+    // Suppression des anciennes tables, dev seulement.
     await connection.execute(
         `BEGIN
-      execute immediate 'drop table users CASCADE CONSTRAINTS';
-      execute immediate 'drop table accounts CASCADE CONSTRAINTS';
-      execute immediate 'drop table transactions CASCADE CONSTRAINTS';
-      exception when others then if sqlcode <> -942 then raise; end if;
-      END;`
-    );
-
-    // Create new tables, dev only.
-    await connection.execute(
-        `create table users (
-      id number generated always as identity,
-      name varchar2(256),
-      email varchar2(512),
-      creation_ts timestamp with time zone default current_timestamp,
-      accounts number default 0,
-      primary key (id)
-    )`
-    );
-    await connection.execute(
-        `create table accounts (
-      id number generated always as identity,
-      name varchar2(256),
-      amount number default 0,
-      user_id number,
-      transactions number default 0,
-      CONSTRAINT fk_user
-      FOREIGN KEY (user_id)
-      REFERENCES users (id),
-      creation_ts timestamp with time zone default current_timestamp,
-      primary key (id)
-  )`
-    );
-
-    await connection.execute(
-        `create table transactions (
-      id number generated always as identity,
-      name varchar2(256),
-      amount number,
-      type number(1) check (type in (0, 1)),
-      account_id number,
-      CONSTRAINT fk_account
-      FOREIGN KEY (account_id)
-      REFERENCES accounts (id),
-      creation_ts timestamp with time zone default current_timestamp,
-      primary key (id)
-  )`
-    );
-
-    await connection.execute(
-        `CREATE OR REPLACE PROCEDURE format_transaction_name (
-          p_transaction_type IN transactions.type%TYPE,
-          p_transaction_name IN transactions.name%TYPE,
-          p_formatted_name OUT VARCHAR2
-        ) AS
-        BEGIN
-          p_formatted_name := 'T' || p_transaction_type || '-' || UPPER(p_transaction_name);
+          execute immediate 'drop table users CASCADE CONSTRAINTS';
+          execute immediate 'drop table accounts CASCADE CONSTRAINTS';
+          execute immediate 'drop table transactions CASCADE CONSTRAINTS';
+          exception when others then if sqlcode <> -942 then raise; end if;
         END;`
+    );
+
+    // Création des nouvelles tables, dev seulement.
+    await connection.execute(
+        `CREATE TABLE users (
+          id NUMBER GENERATED ALWAYS AS IDENTITY,
+          name VARCHAR2(256),
+          email VARCHAR2(512),
+          creation_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          accounts NUMBER DEFAULT 0,
+          PRIMARY KEY (id)
+        )`
+    );
+    await connection.execute(
+        `CREATE TABLE accounts (
+          id NUMBER GENERATED ALWAYS AS IDENTITY,
+          name VARCHAR2(256),
+          amount NUMBER DEFAULT 0,
+          user_id NUMBER,
+          transactions NUMBER DEFAULT 0,
+          CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users (id),
+          creation_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id)
+        )`
+    );
+
+    await connection.execute(
+        `CREATE TABLE transactions (
+          id NUMBER GENERATED ALWAYS AS IDENTITY,
+          name VARCHAR2(256),
+          amount NUMBER,
+          type NUMBER(1) CHECK (type IN (0, 1)),
+          account_id NUMBER,
+          CONSTRAINT fk_account FOREIGN KEY (account_id) REFERENCES accounts (id),
+          creation_ts TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (id)
+        )`
+    );
+
+    await connection.execute(
+        `CREATE OR REPLACE PROCEDURE export_transactions_to_csv (
+            p_account_id IN transactions.account_id%TYPE
+        ) IS
+            v_file UTL_FILE.FILE_TYPE;
+            v_line VARCHAR2(32767);
+        BEGIN
+            v_file := UTL_FILE.FOPEN('EXPORT_DIR', 'transactions.csv', 'W');
+            
+            UTL_FILE.PUT_LINE(v_file, 'ID,NAME,AMOUNT,TYPE,ACCOUNT_ID');
+            
+            FOR rec IN (SELECT id, name, amount, type, account_id FROM transactions WHERE account_id = p_account_id) LOOP
+                v_line := rec.id || ',' || rec.name || ',' || rec.amount || ',' || rec.type || ',' || rec.account_id;
+                UTL_FILE.PUT_LINE(v_file, v_line);
+            END LOOP;
+            
+            UTL_FILE.FCLOSE(v_file);
+        EXCEPTION
+            WHEN OTHERS THEN
+                IF UTL_FILE.IS_OPEN(v_file) THEN
+                    UTL_FILE.FCLOSE(v_file);
+                END IF;
+                RAISE;
+        END export_transactions_to_csv;`
+    );
+
+    await connection.execute(
+        `CREATE OR REPLACE PROCEDURE read_file(p_filename IN VARCHAR2, p_file_content OUT CLOB) IS
+            l_file UTL_FILE.FILE_TYPE;
+            l_line VARCHAR2(32767);
+        BEGIN
+            p_file_content := '';
+            l_file := UTL_FILE.FOPEN('EXPORT_DIR', p_filename, 'R');
+            
+            LOOP
+                BEGIN
+                    UTL_FILE.GET_LINE(l_file, l_line);
+                    p_file_content := p_file_content || l_line || CHR(10);
+                EXCEPTION
+                    WHEN NO_DATA_FOUND THEN
+                        EXIT;
+                END;
+            END LOOP;
+            
+            UTL_FILE.FCLOSE(l_file);
+        EXCEPTION
+            WHEN UTL_FILE.INVALID_PATH THEN
+                RAISE_APPLICATION_ERROR(-20001, 'Invalid file path');
+            WHEN UTL_FILE.READ_ERROR THEN
+                RAISE_APPLICATION_ERROR(-20004, 'File read error');
+            WHEN OTHERS THEN
+                RAISE_APPLICATION_ERROR(-20005, 'An error occurred: ' || SQLERRM);
+        END read_file;`
     );
 
     await connection.execute(
         `CREATE OR REPLACE PROCEDURE insert_user (
-          p_user_name IN users.name%TYPE,
-          p_user_email IN users.email%TYPE,
-          p_user_id OUT users.id%TYPE
-      ) AS
-      BEGIN
-          INSERT INTO users (name, email)
-          VALUES (p_user_name, p_user_email)
-          RETURNING id INTO p_user_id;
-      END;`
+            p_user_name IN users.name%TYPE,
+            p_user_email IN users.email%TYPE,
+            p_user_id OUT users.id%TYPE
+        ) AS
+        BEGIN
+            INSERT INTO users (name, email)
+            VALUES (p_user_name, p_user_email)
+            RETURNING id INTO p_user_id;
+        END;`
     );
 
     await connection.execute(
         `CREATE OR REPLACE PROCEDURE insert_account (
-          p_account_name IN accounts.name%TYPE,
-          p_account_amount IN accounts.amount%TYPE,
-          p_user_id IN accounts.user_id%TYPE,
-          p_account_id OUT accounts.id%TYPE
-      ) AS
-      BEGIN
-          INSERT INTO accounts (name, amount, user_id)
-          VALUES (p_account_name, p_account_amount, p_user_id)
-          RETURNING id INTO p_account_id;
+            p_account_name IN accounts.name%TYPE,
+            p_account_amount IN accounts.amount%TYPE,
+            p_user_id IN accounts.user_id%TYPE,
+            p_account_id OUT accounts.id%TYPE
+        ) AS
+        BEGIN
+            INSERT INTO accounts (name, amount, user_id)
+            VALUES (p_account_name, p_account_amount, p_user_id)
+            RETURNING id INTO p_account_id;
 
-          UPDATE users
-          SET accounts = accounts + 1
-          WHERE id = p_user_id;
-      END;`
+            UPDATE users
+            SET accounts = accounts + 1
+            WHERE id = p_user_id;
+        END;`
     );
 
     await connection.execute(
         `CREATE OR REPLACE PROCEDURE insert_transaction (
-          p_transaction_name IN transactions.name%TYPE,
-          p_transaction_amount IN transactions.amount%TYPE,
-          p_transaction_type IN transactions.type%TYPE,
-          p_account_id IN transactions.account_id%TYPE,
-          p_transaction_id OUT transactions.id%TYPE
+            p_transaction_name IN transactions.name%TYPE,
+            p_transaction_amount IN transactions.amount%TYPE,
+            p_transaction_type IN transactions.type%TYPE,
+            p_account_id IN transactions.account_id%TYPE,
+            p_transaction_id OUT transactions.id%TYPE
         ) AS
-          v_formatted_name VARCHAR2(256);
+            v_formatted_name VARCHAR2(256);
         BEGIN
-          -- Call the formatting procedure
-          format_transaction_name(p_transaction_type, p_transaction_name, v_formatted_name);
+            -- Appel de la procédure de formatage
+            format_transaction_name(p_transaction_type, p_transaction_name, v_formatted_name);
 
-          INSERT INTO transactions (name, amount, type, account_id)
-          VALUES (v_formatted_name, p_transaction_amount, p_transaction_type, p_account_id)
-          RETURNING id INTO p_transaction_id;
+            INSERT INTO transactions (name, amount, type, account_id)
+            VALUES (v_formatted_name, p_transaction_amount, p_transaction_type, p_account_id)
+            RETURNING id INTO p_transaction_id;
 
-          IF p_transaction_type = 1 THEN -- In transaction
-            UPDATE accounts
-            SET amount = amount + p_transaction_amount,
-                transactions = transactions + 1
-            WHERE id = p_account_id;
-          ELSIF p_transaction_type = 0 THEN -- Out transaction
-            UPDATE accounts
-            SET amount = amount - p_transaction_amount,
-                transactions = transactions + 1
-            WHERE id = p_account_id;
-          END IF;
+            IF p_transaction_type = 1 THEN -- Entrée
+                UPDATE accounts
+                SET amount = amount + p_transaction_amount,
+                    transactions = transactions + 1
+                WHERE id = p_account_id;
+            ELSIF p_transaction_type = 0 THEN -- Sortie
+                UPDATE accounts
+                SET amount = amount - p_transaction_amount,
+                    transactions = transactions + 1
+                WHERE id = p_account_id;
+            END IF;
         END;`
     );
 
-    // Insert some data
-    const usersSql = `insert into users (name, email, accounts) values(:1, :2, :3)`;
+    // Insérer des données
+    const usersSql = `INSERT INTO users (name, email, accounts) VALUES(:1, :2, :3)`;
     const usersRows = [
         ["Valentin Montagne", "contact@vm-it-consulting.com", 0],
         ["Amélie Dal", "amelie.dal@gmail.com", 0],
     ];
 
     await connection.executeMany(usersSql, usersRows);
-    const accountsSql = `insert into accounts (name, amount, user_id) values(:1, :2, :3)`;
+    const accountsSql = `INSERT INTO accounts (name, amount, user_id) VALUES(:1, :2, :3)`;
     const accountsRows = [["Compte courant", 2000, 1]];
     await connection.executeMany(accountsSql, accountsRows);
-    connection.commit();
+    await connection.commit();
 }
 
-// Define routes
+
 app.get("/", async (req, res) => {
-    res.render("index"); // Assuming you have an "index.ejs" file in the "views" directory
+    res.render("index");
 });
 
 app.get("/users", async (req, res) => {
@@ -193,7 +225,7 @@ app.get("/accounts", async (req, res) => {
 
 app.post("/users", async (req, res) => {
     const createUserSQL = `BEGIN
-      insert_user(:name, :email, :user_id);
+          insert_user(:name, :email, :user_id);
     END;`;
     const result = await connection.execute(createUserSQL, {
         name: req.body.name,
@@ -211,7 +243,7 @@ app.post("/users", async (req, res) => {
 
 app.post("/accounts", async (req, res) => {
     const createAccountSQL = `BEGIN
-      insert_account(:name, :amount, :user_id, :account_id);
+          insert_account(:name, :amount, :user_id, :account_id);
     END;`;
     const result = await connection.execute(createAccountSQL, {
         name: req.body.name,
@@ -230,7 +262,7 @@ app.post("/accounts", async (req, res) => {
 
 app.post("/transactions", async (req, res) => {
     const createTransactionSQL = `BEGIN
-      insert_transaction(:name, :amount, :type, :account_id, :transaction_id);
+          insert_transaction(:name, :amount, :type, :account_id, :transaction_id);
     END;`;
     const result = await connection.execute(createTransactionSQL, {
         name: req.body.name,
@@ -269,16 +301,52 @@ app.get("/views/:userId/:accountId", async (req, res) => {
         connection.execute(getCurrentAccountSQL, [req.params.accountId, req.params.userId]),
         connection.execute(getTransactionsSQL, [req.params.accountId]),
     ]);
-    console.log(currentAccount.rows[0], transactions.rows)
+
     res.render("account-view", {
         currentAccount: currentAccount.rows[0],
         transactions: transactions.rows,
     });
 });
 
+app.post("/accounts/:accountId/exports", async (req, res) => {
+    try {
+        await connection.execute(
+            `BEGIN
+                export_transactions_to_csv(:account_id);
+            END;`,
+            { account_id: req.params.accountId }
+        );
+        res.status(200).json({ message: "Export successful" });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Export failed" });
+    }
+});
+
+app.get("/accounts/:accountId/exports", async (req, res) => {
+    try {
+        const result = await connection.execute(
+            `BEGIN
+                read_file('transactions.csv', :content);
+            END;`,
+            {
+                content: { dir: oracledb.BIND_OUT, type: oracledb.CLOB },
+            }
+        );
+
+        const data = await result.outBinds.content.getData();
+        res.header('Content-Type', 'text/csv');
+        res.attachment('transactions.csv');
+        res.send(data);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: "Failed to retrieve export" });
+    }
+});
+
+
 connectToDatabase().then(async () => {
     await setupDatabase();
-
     app.listen(3000, () => {
         console.log("Server started on http://localhost:3000");
     });
